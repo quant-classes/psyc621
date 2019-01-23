@@ -189,8 +189,6 @@ summary(m_lv2)
 detach("package:lmerTest", unload = TRUE)
 ```
 
-
-
 ### Comparing to OLS regression
 
 ```{r}
