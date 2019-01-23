@@ -247,7 +247,7 @@ summary(contextual)
 To separate the effects of a lv-1 predictor into different levels, one needs to
 first center the predictor on the cluster means:
 
-```{r cwc}
+```{r cmc}
 hsball <- hsball %>% 
   group_by(id) %>%   # operate within schools
   mutate(ses_cm = mean(ses),   # create cluster means (the same as `meanses`)
