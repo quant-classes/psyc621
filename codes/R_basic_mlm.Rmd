@@ -242,6 +242,8 @@ summary(contextual)
 
 # 4b. Decomposition
 
+This is the model we talked about on January 24
+
 ## Cluster-mean centering/Group-mean centering
 
 To separate the effects of a lv-1 predictor into different levels, one needs to
