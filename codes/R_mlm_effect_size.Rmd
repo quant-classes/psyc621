@@ -1,0 +1,96 @@
+---
+title: "Computing Effect Size for Multilevel Models in R"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment = ">#")
+```
+
+## Importing Data Into R
+
+We'll import the data in .sav format. 
+
+```{r import_sav, message=FALSE}
+# install.packages("tidyverse")  # if you haven't installed the `tidyverse` package
+library(tidyverse)
+theme_set(theme_bw())  # Use a different theme for plotting with ggplot2
+library(haven)
+# Read in the data (pay attention to the directory)
+hsball <- read_sav("../data/hsball.sav")
+```
+
+## Standardized Mean Difference (SMD)
+
+### Fit a model with `sector` as predictor
+
+```{r load_lme4, message=FALSE}
+library(lme4)
+```
+
+```{r m_sector}
+m_sector <- lmer(mathach ~ sector + (1 | id), data = hsball)
+```
+
+### Obtain $d$ statistic (and 95% CI)
+
+To compute SMD for a binary predictor in a two-level model, using the approach
+by Hedges (2009), please use the provided R script file `mlm_d.R`.
+
+```{r mlm_d.R}
+source("mlm_d.R")
+mlm_d
+```
+
+After you source the R script, simply call the function `mlm_d.R` on the model:
+
+```{r}
+mlm_d(m_sector)
+```
+
+## Variance Accounted For ($R^2$)
+
+### Fit a cross-level interaction model (just an example)
+
+```{r crlv_int}
+hsball <- hsball %>% 
+  group_by(id) %>%   # operate within schools
+  mutate(ses_cm = mean(ses),   # create cluster means (the same as `meanses`)
+         ses_cmc = ses - ses_cm) %>%   # cluster-mean centered
+  ungroup()  # exit the "editing within groups" mode
+crlv_int <- lmer(mathach ~ meanses + sector * ses_cmc + (ses_cmc | id), 
+                 data = hsball)
+```
+
+### Obtain $R^2$:
+
+Use the `sjstats::r2()` function
+
+```{r}
+sjstats::r2(crlv_int)
+```
+
+Generally you should report the `Marginal R2` value. Therefore, the model 
+accounted for `r sjstats::r2(crlv_int)$rsq.marginal`% of the variance of 
+math achievement scores
+
+### Obtain 95% CI
+
+This can be done with parametric bootstrap (`lme4::bootMer()`), but will take
+a few minutes:
+
+```{r, warning = FALSE, message=FALSE}
+mlm_r2 <- function(x, ci = TRUE, 
+                   nsim = 999,  # Some replications may fail, so double check
+                   .progress = "txt", ...) {
+  boot_r2 <- lme4::bootMer(x, function(x) sjstats::r2(x)$rsq.marginal, 
+                           nsim = nsim, .progress = .progress, ...)
+  cat("\nCompleted", length(boot_r2$t), "bootstrap samples\n")
+  boot_r2$R <- length(boot_r2$t)
+  boot_r2_ci <- boot::boot.ci(boot_r2, type = "perc")$perc[4:5]
+  setNames(c(boot_r2$t0, boot_r2_ci[1], boot_r2_ci[2]), 
+           c("Marginal R2", "ci_ul", "ci_ll"))
+}
+mlm_r2(crlv_int)
+```
+
