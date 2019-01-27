@@ -1,0 +1,165 @@
+---
+title: "Multilevel Modeling Diagnostics in R"
+output:
+  html_notebook:
+    toc: yes
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment = ">#")
+```
+
+In R, there are many quite a few diagnostic tools for MLM, although they are 
+not necessarily straightforward to use. In this note I will show some basic 
+tools. 
+
+## Importing Data Into R
+
+We'll import the data in .sav format. 
+
+```{r import_sav, message=FALSE}
+library(tidyverse)
+theme_set(theme_bw())  # Use a different theme for plotting with ggplot2
+library(lme4)
+library(haven)
+# Read in the data (pay attention to the directory)
+hsball <- read_sav("../data/hsball.sav")
+hsball <- as.data.frame(hsball)  # need this to get the influence statistics
+```
+
+## Fitting the model
+
+We will use the example of a cross-level interaction model
+
+```{r crlv_int}
+crlv_int <- lmer(mathach ~ meanses + sector * ses + (ses | id), 
+                 data = hsball)
+```
+
+# Diagnostic Plots
+
+## 1. Residuals (Lv 1.) vs. Every Predictor, Fitted Values
+
+For: linearity, specification, outliers, homoscedasticity
+
+You want to see a random blob with no clear patterns, such as a curvillinear
+shape
+
+```{r resid_vs_fitted}
+# Augment the data with the fitted values and the standardized residuals
+resid_df <- mutate(hsball, 
+                   .std_resid = resid(crlv_int, scaled = TRUE), 
+                   .fitted = fitted(crlv_int))
+# Residual vs. meanses
+p1 <- ggplot(resid_df, 
+       aes(x = meanses, y = .std_resid)) + 
+  geom_point(size = 0.5, alpha = 0.5) +  # show the points
+  geom_smooth(se = FALSE) +  # add a smoother
+  labs(y = "Standardized residuals")
+# Residual vs. ses
+p2 <- ggplot(resid_df, 
+       aes(x = ses, y = .std_resid)) + 
+  geom_point(size = 0.5, alpha = 0.5) +  # show the points
+  geom_smooth(se = FALSE) +  # add a smoother
+  labs(y = "Standardized residuals")
+# Residual vs. sector
+p3 <- ggplot(resid_df, 
+       aes(x = factor(sector),  # factor() is used for categorical predictor
+           y = .std_resid)) + 
+  geom_boxplot() +  # use boxplot with categorical predictor
+  labs(y = "Standardized residuals")
+# Residual vs. fitted
+p4 <- ggplot(resid_df, 
+       aes(x = .fitted, y = .std_resid)) + 
+  geom_point(size = 0.5, alpha = 0.5) +  # show the points
+  geom_smooth(se = FALSE) +  # add a smoother
+  labs(y = "Standardized residuals", x = "Fitted values")
+gridExtra::grid.arrange(p1, p2, p3, p4, nrow = 2L)
+```
+
+Linearity: The plots show no major violations of the linearity assumption, as 
+the trend lines do not suggest unmodelled nonlinear relationships. 
+
+Specification: Correct specification is not easy to assess. It partly depends on
+whether any nonlinear relationships or interaction effects are omitted. From the
+plots, the residuals do not appear to be related to the predictors. *One thing
+to note, however, is that the residuals appear to be bounded, which can indicate
+a ceiling and/or a floor effect. This certainly is due to our outcome variable
+being bounded with a maximum of 25. A model that captures the boundedness 
+(e.g., truncated normal) probably fit the data better. 
+
+Outliers: An outlier is one that lies outside the majority of the data. There 
+was one student who had very low `ses` and one with very high `ses`. We should
+make sure those cases are reasonably values. Also we want to check whether there
+are cases with extremely high standardized residuals. 
+In this example there are some cases with residuals $> 3$ or $< -3$, but they
+don't look outrageously bad. 
+
+Heteroscedasticity: The residual variances appear pretty constant across
+different levels of the fitted values and predictor values.
+
+## Q-Q Plot for Lv-1 Residuals
+
+For: normality
+
+You want to see the points line up nicely along the 45 degree line
+
+```{r qq_lv1}
+library(lattice)  # need this package to use the built-in functions
+qqmath(crlv_int)  # just use the `qqmath()` function on the fitted model
+```
+
+There are some deviations from normality on the two tail areas, which is likely
+due to less kurtosis because of the boundedness of the outcome variable. 
+Generally the impact of kurtosis is not as severe as skewness, and the above 
+plot did not suggest a major issue to the results. 
+
+## Q-Q Plot for Lv-2 Residuals
+
+For: normality
+
+At level 2 there can be more then one set of residuals. For example, in this 
+model, we have one set for the random intercept, and the other set for the 
+random slope
+
+```{r qq_lv2}
+# the code is a bit more complex in order to add, but you only need to replace
+# the reference lines `crlv_int` with the name of your own model to get the
+# plots for your own analyses
+qqmath(ranef(crlv_int), 
+       panel = function(x) {  
+         panel.qqmath(x)
+         panel.qqmathline(x)
+       })
+```
+
+Normality does not appear to be an issue at level 2. 
+
+## Variance Inflation Factor (VIF)
+
+For: multicollinearity
+
+```{r vif_model, message=FALSE}
+library(car)
+car::vif(crlv_int)
+```
+
+As a rule of thumb, one would worry about multicollinearity in the predictors 
+when VIF > 4, and VIF > 10 indicates strong multicollinearity. 
+
+## Influence Index Plot
+
+For: leverage and outliers
+
+To examine whether some cases gives disproportionately strong influence on the
+results, we can look at influence index plot and dfbeta
+
+```{r influence_plots, fig.height=10, fig.width=6}
+inf_crlv_int <- influence(crlv_int, "id")  # get cluster-level influence statistics
+car::infIndexPlot(inf_crlv_int)
+```
+
+If you need some cutoffs, the cutoff for dfbeta is $2 / \sqrt{n}$, which would
+be `r 2 / sqrt(160)` in our example; cutoff for Cook's distance is 
+$4 / (n - 2)$, which would be `r 4 / (160 - 2)` in our example. 
