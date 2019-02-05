@@ -18,7 +18,7 @@ tools.
 
 We'll import the data in .sav format. 
 
-```{r import_sav, message=FALSE}
+```{r import_sav}
 library(tidyverse)
 theme_set(theme_bw())  # Use a different theme for plotting with ggplot2
 library(lme4)
@@ -39,7 +39,7 @@ crlv_int <- lmer(mathach ~ meanses + sector * ses + (ses | id),
 
 # Diagnostic Plots
 
-## 1. Residuals (Lv 1.) vs. Every Predictor, Fitted Values
+## Residuals (Lv 1.) vs. Every Predictor, Fitted Values
 
 For: linearity, specification, outliers, homoscedasticity
 
