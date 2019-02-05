@@ -3,6 +3,8 @@ title: "Running Basic Multilevel Models in R with `lme4`"
 output:
   html_notebook:
     toc: yes
+  pdf_document:
+    toc: yes
 date: "`r format(Sys.time(), '%B %d, %Y')`"
 ---
 
@@ -262,7 +264,7 @@ hsball <- hsball %>%
 
 Lv-1:
 
-$$\texttt{mathach}_{ij} = \beta_{0j} + \beta_{1j} \texttt{ses_cmc}_{ij} + e_{ij}$$
+$$\texttt{mathach}_{ij} = \beta_{0j} + \beta_{1j} \texttt{ses\_cmc}_{ij} + e_{ij}$$
 
 Lv-2:
 
@@ -289,6 +291,7 @@ You can summarize the results using
 
 ```{r summary_decompose}
 summary(decompose)
+confint(decompose)
 ```
 
 If you compare the `REML criterion at convergence` number you can see this is
@@ -305,7 +308,7 @@ hsball %>%
   # randomly sample 20 schools
   filter(id %in% sample(unique(id), 16)) %>% 
 ggplot(aes(x = ses, y = mathach)) + 
-  geom_point() + 
+  geom_point(size = 0.5) + 
   geom_smooth() + 
   facet_wrap( ~ id)
 ```
@@ -315,7 +318,7 @@ ggplot(aes(x = ses, y = mathach)) +
 
 Lv-1:
 
-$$\texttt{mathach}_{ij} = \beta_{0j} + \beta_{1j} \texttt{ses_cmc}_{ij} + e_{ij}$$
+$$\texttt{mathach}_{ij} = \beta_{0j} + \beta_{1j} \texttt{ses\_cmc}_{ij} + e_{ij}$$
 
 Lv-2:
 
@@ -332,6 +335,7 @@ We have to put `ses` in the random part:
 
 ```{r ran_slp}
 ran_slp <- lmer(mathach ~ meanses + ses_cmc + (ses_cmc | id), data = hsball)
+summary(lm(mathach ~ meanses + ses_cmc, data = hsball))
 ```
 
 Alternatively, you can also use the `update` function.
@@ -356,11 +360,13 @@ As an example,
 
 ```{r compare_hidden, include=FALSE}
 p_lmer <- anova(ran_slp, decompose)$`Pr(>Chisq)`[2]
+anova(ran_slp, decompose)
 ```
 
 ```{r compare_decompose_ran_slp}
 # With `lme4`
 anova(ran_slp, decompose)
+pchisq(10.6, df = 2, lower.tail = FALSE)
 ```
 
 The _p_ value is `r p_lmer` / 2 = `r p_lmer / 2` using `lme4`. 
@@ -373,7 +379,8 @@ predict_ran_slp <- hsball %>%
   select(id, ses) %>% 
   mutate(fit = predict(ran_slp))
 
-ggplot(data = predict_ran_slp, aes(x = ses, y = fit, color = factor(id))) +
+ggplot(data = predict_ran_slp, 
+       aes(x = ses, y = fit, color = factor(id))) +
   geom_smooth(method = "lm", se = FALSE, size = 0.5) + 
   labs(y = "Predicted mathach") + 
   guides(color = FALSE)
@@ -388,7 +395,7 @@ ggplot(data = predict_ran_slp, aes(x = ses, y = fit, color = factor(id))) +
 
 Lv-1:
 
-$$\texttt{mathach}_{ij} = \beta_{0j} + \beta_{1j} \texttt{ses_cmc}_{ij} + e_{ij}$$
+$$\texttt{mathach}_{ij} = \beta_{0j} + \beta_{1j} \texttt{ses\_cmc}_{ij} + e_{ij}$$
 
 Lv-2:
 
@@ -425,6 +432,9 @@ You can summarize the results using
 
 ```{r summary_crlv_int}
 summary(crlv_int)
+predict(crlv_int, data.frame(meanses = .17, 
+                             ses_cmc = -.17, 
+                             sector = 1), re.form = NA)
 ```
 
 ## Plotting the Interactions
@@ -462,3 +472,20 @@ Or in HTML output:
 ```{r, results='asis'}
 texreg::htmlreg(list(ran_int, m_lv2, contextual, ran_slp, crlv_int))
 ```
+
+Or in PDF:
+
+```{r, results='asis'}
+texreg::texreg(list(ran_int, m_lv2, contextual, ran_slp, crlv_int), 
+               custom.gof.names = c("AIC", "BIC", "LL", "N", "J", 
+                                    "$\\tau_{00}$", "$\\sigma^2$",
+                                    "$\\tau_{11}$", "$\\tau_{01}$"))
+```
+
+# Model Comparison
+
+```{r}
+AIC(refitML(ran_int), refitML(m_lv2), refitML(contextual), 
+    refitML(ran_slp), refitML(crlv_int))
+```
+
