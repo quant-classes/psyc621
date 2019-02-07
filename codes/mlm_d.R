@@ -43,7 +43,7 @@ mlm_d <- function(x, ci = TRUE, nsim = 999,
     cat("\nCompleted", length(boot_d$t), "bootstrap samples\n")
     boot_d$R <- length(boot_d$t)
     setNames(c(boot_d$t0, sd(boot_d$t), boot_d_ci[1], boot_d_ci[2]), 
-             c("d", "se", "ci_ul", "ci_ll"))
+             c("d", "se", "ci_ll", "ci_ul"))
   } else {
     c(d = compute_d(x))
   }

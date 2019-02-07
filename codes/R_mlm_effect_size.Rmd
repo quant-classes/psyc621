@@ -68,6 +68,8 @@ Use the `sjstats::r2()` function
 
 ```{r}
 sjstats::r2(crlv_int)
+library(sjstats)
+r2(crlv_int)
 ```
 
 Generally you should report the `Marginal R2` value. Therefore, the model 
@@ -89,8 +91,9 @@ mlm_r2 <- function(x, ci = TRUE,
   boot_r2$R <- length(boot_r2$t)
   boot_r2_ci <- boot::boot.ci(boot_r2, type = "perc")$perc[4:5]
   setNames(c(boot_r2$t0, boot_r2_ci[1], boot_r2_ci[2]), 
-           c("Marginal R2", "ci_ul", "ci_ll"))
+           c("Marginal R2", "ci_ll", "ci_ul"))
 }
+set.seed(123)
 mlm_r2(crlv_int)
 ```
 
