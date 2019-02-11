@@ -1,0 +1,176 @@
+---
+title: "MLM with Small Samples in R"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment = ">#")
+```
+
+## Importing Data Into R
+
+```{r import_sav, message=FALSE}
+# install.packages("tidyverse")  # if you haven't installed the `tidyverse` package
+library(tidyverse)
+theme_set(theme_bw())  # Use a different theme for plotting with ggplot2
+library(haven)
+# Read in the data (pay attention to the directory)
+hsball <- read_sav("../data/hsball.sav")
+```
+
+## Create a Small Subsample
+
+Select only first 15 schools, and randomly select 5 students from each school
+
+```{r}
+sch_sel <- unique(hsball$id)[1:15]  # ID of first 15 schools
+set.seed(16)  # make the results reproducible
+hsbsub <- hsball %>% 
+  filter(id %in% sch_sel) %>%
+  group_by(id) %>% 
+  sample_n(5) %>%  # five random observations in each school
+  mutate(ses_cmc = ses - mean(ses))  # cluster-mean centered variable
+hsbsub  # only 75 cases
+```
+
+## Restricted Maximum Likelihood (REML)
+
+```{r, message=FALSE}
+library(lme4)
+# Regular REML
+m_reml <- lmer(mathach ~ meanses + sector * ses_cmc + (ses_cmc | id), 
+               data = hsbsub)
+summary(m_reml)
+```
+
+Compare it to maximum likelihood:  
+(there is a convergence problem)
+
+```{r}
+# Regular ML
+m_ml <- lmer(mathach ~ meanses + sector * ses_cmc + (ses_cmc | id), 
+             data = hsbsub, REML = FALSE)
+summary(m_ml)
+```
+
+## Bootstrap Confidence Intervals
+
+To get a more accurate confidence interval with relatively small sample, use 
+the parametric bootstrap
+
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+confint(m_reml, parm = "beta_",  # only fixed effects
+        method = "boot", nsim = 4999,  # 4999 bootstrap samples
+        boot.type = "basic")  # basic bootstrap CI
+```
+
+<!-- In this part I just try to cache the results to avoid the long computational time -->
+
+```{r, include=FALSE, cache=TRUE, cache.vars='ci_boot'}
+(ci_boot <- 
+   confint(m_reml, parm = "beta_",  # only fixed effects
+           method = "boot", nsim = 4999,  # 4999 bootstrap samples
+           boot.type = "basic")  # basic bootstrap CI
+)
+```
+
+```{r, echo=FALSE}
+ci_boot
+```
+
+Compared to likelihood-based CI (with some warning messages):
+
+```{r, warning=FALSE}
+confint(m_reml, parm = "beta_")
+```
+
+### Bootstrap sampling distribution
+
+Get bootstrap distribution of $\tau_{11}$:
+
+```{r, warning=FALSE, message=FALSE, cache=TRUE, cache.vars='boo'}
+library(boot)  # load the `boot` package
+# Extract the random effect variances
+boo <- bootMer(m_reml, 
+               FUN = function(x) {
+                 as.data.frame(VarCorr(x))[ , "vcov"]
+               }, 
+               nsim = 999)
+# Bootstrap standard errors and bias:
+boo
+# Plot the distribution of the random slope variance
+plot(boo, index = 2)  # the slope variance is the 2nd value
+```
+
+
+## Kenward-Roger (KR) Procedure
+
+Caution: the KR procedure can be extremely time and resource consuming 
+(i.e., it runs for a few hours and freezes your computer). __Do not use it 
+when you have more than about 50 clusters__ (where regular MLM is accurate 
+enough).
+
+```{r, message=FALSE}
+library(lmerTest)
+# Rerun the model after loading the `lmerTest` package
+m_kr <- lmer(mathach ~ meanses + sector * ses_cmc + (ses_cmc | id), 
+               data = hsbsub)
+summary(m_kr, ddf = "Kenward-Roger")  # use the KR procedure
+```
+
+## Bayesian Estimation
+
+### `brms`
+
+Use the `brms` package, with weakly informative priors:
+
+```{r, cache=TRUE, cache.vars='m_brm', results='hide', message=FALSE}
+# library(brms)
+# m_brm <- brm(mathach ~ meanses + sector * ses_cmc + (ses_cmc | id), 
+#              data = hsbsub, 
+#              # if you see a warning about increasing adapt_delta, include
+#              # the following:
+#              control = list(adapt_delta = .95), 
+#              # N(0, 10^2) prior for fixed effects
+#              prior = prior(normal(0, 10), class = b))
+```
+
+```{r}
+# summary(m_brm)
+```
+
+### `MCMCglmm`
+
+Use the `MCMCglmm` package, with vague priors:
+
+```{r, cache=TRUE, cache.vars='m_mcmc', results='hide', message=FALSE}
+library(MCMCglmm)
+m_mcmc <- MCMCglmm(fixed = mathach ~ meanses + sector * ses_cmc, 
+                   # Unstructured level-2 covariance matrix
+                   random = ~ us(1 + ses_cmc):id,
+                   data = hsbsub, 
+                   prior = list(
+                     # N(0, 1000) prior for intercept
+                     # N(0, 100) prior for main effects
+                     # N(0, 25) prior for interaction 
+                     B = list(mu = c(0, 0, 0, 0, 0), 
+                              V = diag(c(1000, 100, 100, 100, 25))), 
+                     # weakly informative prior for tau00, tau01, and tau11
+                     G = list(G1 = list(V = diag(2), nu = 2)),  
+                     R = list(V = 1, nu = 0.002)  # vague prior for sigma-sq
+                   ))
+```
+
+```{r}
+summary(m_mcmc)
+```
+
+## Recommendation
+
+With a small sample size, I would generally trust the results of Bayesian 
+analyses with weakly informative (regularizing) priors the most, and then the 
+Kenward-Roger procedure if $p$ values and significance test results are needed.
