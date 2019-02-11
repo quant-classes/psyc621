@@ -1,0 +1,138 @@
+---
+title: "Bayesian Multilevel Models in R with `MCMCglmm`"
+output:
+  html_notebook:
+    toc: yes
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment = ">#")
+```
+
+In this note I'll replicate the models I demonstrated in the class with
+Bayesian estimation and the `MCMCglmm` package. 
+
+# 1. Importing Data Into R
+
+We'll import the data in .sav format. 
+
+```{r import_sav, message=FALSE}
+# install.packages("tidyverse")  # if you haven't installed the `tidyverse` package
+library(tidyverse)
+theme_set(theme_bw())  # Use a different theme for plotting with ggplot2
+library(haven)
+# Read in the data (pay attention to the directory)
+hsball <- read_sav("../data/hsball.sav")
+hsball  # print the first 10 rows
+```
+
+# 2. Random Intercept Model
+
+First load the package:
+
+```{r load_lme4, message=FALSE}
+# install.packages("MCMCglmm")  # if you haven't installed the `MCMCglmm`
+# package, which requires `rstan` to be installed first
+library(MCMCglmm)
+```
+
+```{r ran_int, results='hide'}
+ran_int <- MCMCglmm(fixed = mathach ~ 1, 
+                    random = ~ idv(1):id,  # it's the way MCMCglmm specify a random intercept
+                    data = hsball, 
+                    prior = list(B = list(mu = 0, V = 1000),  # N(0, 1000) prior for intercept
+                                 G = list(G1 = list(V = 1, nu = 1)),  # weakly informative prior for tau00
+                                 R = list(V = 1, nu = 0.002)))  # vague prior for sigma-sq
+```
+
+You can summarize the results using
+
+```{r summary_ran_int}
+summary(ran_int)
+```
+
+## Plot Posterior Density
+
+```{r}
+plot(ran_int)
+```
+
+
+# 3. Model With a Lv-2 predictor
+
+```{r m_lv2, results='hide'}
+m_lv2 <- MCMCglmm(fixed = mathach ~ meanses, 
+                  random = ~ idv(1):id,  # it's the way MCMCglmm specify a random intercept
+                  data = hsball, 
+                  prior = list(# N(0, 100) prior for coefficient
+                    B = list(mu = c(0, 0), V = diag(c(1000, 100))),   
+                    G = list(G1 = list(V = 1, nu = 1)),  # weakly informative prior for tau00
+                    R = list(V = 1, nu = 0.002)  # vague prior for sigma-sq
+                  ))
+```
+
+```{r summary_m_lv2}
+summary(m_lv2)
+```
+
+# 4. Decomposing Effects
+
+```{r contextual, results='hide'}
+hsball <- hsball %>% 
+  group_by(id) %>%   # operate within schools
+  mutate(ses_cm = mean(ses),   # create cluster means (the same as `meanses`)
+         ses_cmc = ses - ses_cm) %>%   # cluster-mean centered
+  ungroup()  # exit the "editing within groups" mode
+decompose <- MCMCglmm(fixed = mathach ~ meanses + ses_cmc, 
+                      random = ~ idv(1):id,  # it's the way MCMCglmm specify a random intercept
+                      data = hsball, 
+                      prior = list(# N(0, 100) prior for coefficient
+                        B = list(mu = c(0, 0, 0), V = diag(c(1000, 100, 100))),   
+                        G = list(G1 = list(V = 1, nu = 1)),  # weakly informative prior for tau00
+                        R = list(V = 1, nu = 0.002)  # vague prior for sigma-sq
+                      ))
+```
+
+```{r summary_contextual}
+summary(decompose)
+```
+
+# 5. Run the Random-Coefficients Model
+
+```{r ran_slp, results='hide'}
+ran_slp <- MCMCglmm(fixed = mathach ~ meanses + ses_cmc, 
+                    # Unstructured level-2 covariance matrix
+                    random = ~ us(1 + ses_cmc):id,  
+                    data = hsball, 
+                    prior = list(# N(0, 100) prior for coefficient
+                      B = list(mu = c(0, 0, 0), V = diag(c(1000, 100, 100))), 
+                      # weakly informative prior for tau00, tau01, and tau11
+                      G = list(G1 = list(V = diag(2), nu = 2)),
+                      R = list(V = 1, nu = 0.002)  # vague prior for sigma-sq
+                    ))
+```
+
+```{r summary_ran_slp}
+summary(ran_slp)
+```
+
+# 6. Analyzing Cross-Level Interactions
+
+```{r crlv_int, results='hide'}
+crlv_int <- MCMCglmm(fixed = mathach ~ meanses + sector * ses_cmc, 
+                     # Unstructured level-2 covariance matrix
+                     random = ~ us(1 + ses_cmc):id,  
+                     data = hsball, 
+                     prior = list(# N(0, 25) prior for interaction
+                      B = list(mu = c(0, 0, 0, 0, 0), 
+                               V = diag(c(1000, 100, 100, 100, 25))), 
+                      # weakly informative prior for tau00, tau01, and tau11
+                      G = list(G1 = list(V = diag(2), nu = 2)),
+                      R = list(V = 1, nu = 0.002)  # vague prior for sigma-sq
+                    ))
+```
+
+```{r summary_crlv_int}
+summary(crlv_int)
+```
