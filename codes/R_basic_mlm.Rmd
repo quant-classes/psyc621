@@ -305,7 +305,7 @@ same as what you will get in the contextual effect model
 ### Joint test of fixed effects
 
 ```{r}
-anova(decompose, ran_int, ddf = "Satterthwaite")
+anova(decompose, ran_int)
 ```
 
 
