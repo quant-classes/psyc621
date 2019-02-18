@@ -1,0 +1,307 @@
+---
+title: "Multilevel Analysis of Example 1 in Hoffman & Rovine (2007)"
+author: "PSYC 621"
+date: "2/9/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Preparing the R Environment
+
+```{r, message=FALSE}
+library(tidyverse)
+theme_set(theme_bw())  # Use a different theme for plotting with ggplot2
+library(lme4)
+library(GGally)
+```
+
+
+## Import Data
+
+The data set is already in long format
+
+```{r import_sav, message=FALSE}
+# Read in the data (pay attention to the directory)
+driving_dat <- haven::read_sav("../data/Ex1.sav")
+# Use the value labels from SPSS
+driving_dat <- driving_dat %>% 
+  mutate(sex = as_factor(sex))
+driving_dat  # print the first 10 rows
+```
+
+With SPSS data, you can view the variable labels by 
+
+```{r}
+driving_dat %>% 
+  map(~ attr(.x, "label"))
+```
+
+## Descriptive Statistics
+
+### Missing Data Rate for Response Time:
+
+```{r}
+driving_dat %>% 
+  group_by(id) %>% 
+  summarise(n_missing = sum(is.na(rt_sec))) %>% 
+  ggplot(aes(x = n_missing)) + 
+  geom_bar()
+```
+
+Note that only about 80 people have no missing data
+
+### Plotting
+
+Here I will show you the use of `GGally::
+
+```{r, warning=FALSE}
+# psych::pairs.panels(driving_dat %>% 
+#                       # Select six variables
+#                       select(sex, age, rt_sec, meaning, salience, lg_rt))
+driving_dat %>% 
+  # GGally doesn't work well with data with labels, so I use the following
+  # functions to remove them
+  sjlabelled::remove_all_labels() %>% 
+    haven::zap_formats() %>% 
+    haven::zap_widths() %>% 
+  # Use GGally to get a summative plot
+  GGally::ggpairs(# mapping = aes(color = sex, alpha = 0.5),  # colored by `sex`
+                  columns = c(3, 7, 8, 5, 9),  # column 3, 5, 7, 8, 9
+                  lower = list(
+                    continuous = GGally::wrap(
+                      "smooth", position = "jitter", size = 0.5, alpha = 0.1)))
+```
+
+Note the nonnormality in response time. There doesn't appear to be much gender
+differences. 
+
+Below is a plot between response time against age:
+
+Left: original response time; Right: Natural log transformation
+
+```{r}
+p1 <- driving_dat %>% 
+  ggplot(aes(x = age, y = rt_sec)) +
+  geom_jitter(width = 0.5, height = 0, alpha = 0.5) + 
+  geom_smooth()
+p2 <- driving_dat %>% 
+  ggplot(aes(x = age, y = lg_rt)) +
+  geom_jitter(width = 0.5, height = 0, alpha = 0.5) + 
+  geom_smooth()
+gridExtra::grid.arrange(p1, p2)
+```
+
+## Intraclass Correlation (and 95% CI)
+
+```{r}
+m0 <- lmer(lg_rt ~ (1 | id), data = driving_dat)
+summary(m0)
+(icc <- 1 / (1 + 1/ m0@theta^2))
+# Confidence interval of ICC:
+bootMer(m0, FUN = function(x) 1 / (1 + 1/ x@theta^2), 
+        nsim = 500, seed = 31415926) %>% 
+  boot::boot.ci(type = "perc")
+```
+
+## Two-Level Analysis
+
+Ignore random-item effect
+
+```{r}
+# No random slopes (some SEs probably underestimated)
+m1 <- lmer(lg_rt ~ c_mean * c_sal * oldage + (1 | id), data = driving_dat)
+# Random slope for `c_mean`
+m1_rs1 <- update(m1, . ~ . - (1 | id) + (c_mean | id))
+anova(m1, m1_rs1)  # No evidence
+# Random slope for `c_sal`
+m1_rs2 <- update(m1, . ~ . - (1 | id) + (c_sal | id))
+anova(m1, m1_rs2)  # No evidence
+# Add all four random slopes
+m1_rs3 <- update(m1, . ~ . - (1 | id) + (c_mean * c_sal | id))
+anova(m1, m1_rs3)  # No evidence
+AIC(refitML(m1), refitML(m1_rs1), 
+    refitML(m1_rs2), refitML(m1_rs3))  # support no residual random slopes
+```
+
+```{r}
+summary(m1)
+```
+
+#### Plot interactions
+
+```{r}
+sjPlot::plot_model(m1, type = "pred", 
+                   terms = c("c_sal", 
+                             "c_mean [-2, 0, 2]", 
+                             "oldage"))
+```
+
+#### Effect Size
+
+```{r}
+mlm_r2 <- function(x, ci = TRUE, 
+                   nsim = 999,  # Some replications may fail, so double check
+                   .progress = "txt", ...) {
+  boot_r2 <- lme4::bootMer(x, function(x) sjstats::r2(x)$rsq.marginal, 
+                           nsim = nsim, .progress = .progress, ...)
+  cat("\nCompleted", length(boot_r2$t), "bootstrap samples\n")
+  boot_r2$R <- length(boot_r2$t)
+  boot_r2_ci <- boot::boot.ci(boot_r2, type = "perc")$perc[4:5]
+  setNames(c(boot_r2$t0, boot_r2_ci[1], boot_r2_ci[2]), 
+           c("Marginal R2", "ci_ll", "ci_ul"))
+}
+mlm_r2(m1)
+```
+
+
+#### Diagnostics
+
+```{r}
+# Residuals vs. age
+driving_dat %>% 
+  drop_na() %>%  # remove cases with missing values
+  mutate(.resid = resid(m1, scale = TRUE)) %>% 
+  ggplot(aes(x = age, y = .resid)) + 
+  geom_point(size = 0.5, alpha = 0.5) + 
+  geom_smooth()
+# Residuals vs. Item
+driving_dat %>% 
+  drop_na() %>%  # remove cases with missing values
+  mutate(.resid = resid(m1, scale = TRUE)) %>% 
+  ggplot(aes(x = factor(Item), y = .resid)) + 
+  geom_boxplot()
+```
+
+## Cross-Classified Random Effect Analysis
+
+```{r, echo=FALSE}
+DiagrammeR::grViz("
+digraph boxes_and_circles {
+  graph [layout = neato, overlap = true, fontsize = 30]
+
+  node [penwidth = 0, fontname = 'Helvetica']
+  # Person
+  1 [pos = '-2,1!', label='Person 1']
+  2 [pos = '-1,1!', label='Person 2'] 
+  3 [pos = '0,1!', label='Person 3']
+  4 [pos = '1,1!', label='Person 4']
+  5 [pos = '2,1!', label='Person 5']
+  # Repeated measures
+  y1 [pos = '-2.33,0!']
+  y2 [pos = '-2,0!']
+  y3 [pos = '-1.67,0!']
+  y4 [pos = '-1.33,0!']
+  y5 [pos = '-1,0!']
+  y6 [pos = '-0.67,0!']
+  y7 [pos = '-0.33,0!']
+  y8 [pos = '0,0!']
+  y9 [pos = '0.33,0!']
+  y10 [pos = '0.67,0!']
+  y11 [pos = '1,0!']
+  y12 [pos = '1.33,0!']
+  y13 [pos = '1.67,0!']
+  y14 [pos = '2,0!']
+  y15 [pos = '2.33,0!']
+  
+  # Item
+  i1 [pos = '-1.5,-1!', label='Item 1']
+  i2 [pos = '-0,-1!', label='Item 2']
+  i3 [pos = '1.5,-1!', label='Item 3']
+
+  # edges
+  edge [dir = 'none']
+  1 -> {y1; y2; y3}
+  2 -> {y4; y5; y6}
+  3 -> {y7; y8; y9}
+  4 -> {y10; y11; y12}
+  5 -> {y13; y14; y15}
+  {y1 y4 y7 y10 y13} -> i1
+  {y2 y5 y8 y11 y14} -> i2
+  {y3 y6 y9 y12 y15} -> i3
+}
+")
+```
+
+Account for shared variance of item:
+
+- Now, it can be seen that `c_mean` and `c_sal` are item-level variables
+
+```{r}
+# No random slopes (some SEs probably underestimated)
+m2 <- lmer(lg_rt ~ c_mean * c_sal * oldage + (1 | id) + (1 | Item), 
+           data = driving_dat)
+anova(m2, m1)
+# Random Age effect
+m2_rs1 <- lmer(lg_rt ~ c_mean * c_sal * oldage + (1 | id) + (oldage | Item), 
+           data = driving_dat)
+anova(m2, m2_rs1)  # Evidence for random slope
+```
+
+### Piecewise age effect
+
+For older participants, do they just respond similar or is there an additional
+aging effect?
+
+```{r}
+library(lmerTest)
+m3_rs1 <- update(m2_rs1, . ~ . + yrs65)
+m3_rs2 <- update(m3_rs1, . ~ . - (oldage | Item) + (oldage + yrs65 | Item))
+# Model failed to converge, but random age effect seems present
+anova(m3_rs1, m3_rs2)
+summary(m3_rs2)
+```
+
+#### Plot the marginal age effect
+
+```{r}
+# First, obtain the predicted values
+driving_dat %>% 
+  drop_na() %>%  # remove cases with missing values
+  mutate(.fitted = fitted(m3_rs2)) %>% 
+  ggplot(aes(x = age, y = .fitted)) + 
+  geom_point() + 
+  geom_smooth()
+```
+
+### Bayesian analyses
+
+For response time, a better model is the ex-Gaussian model, which assumes that
+the respone time has two components: a decision making component (exponential)
+and a residual perceptual/response process component (normal). For more 
+information, consult the attached paper by Palmer and colleagues (2011, 
+Journal of Experimental Psychology: Human Perception & Performance). 
+
+In addition, for the missing responses, we actually know that the response time
+is larger than 60 seconds. Therefore, we should use that information and use a 
+censored model. Below are some sample code you can try yourself (warning: it 
+can take days to run).
+
+```{r, cache=TRUE, cache.vars='m4_brm', eval=FALSE}
+# Recode missing to 60
+driving_dat <- driving_dat %>% 
+  mutate(rt_sec2 = replace_na(rt_sec, 60) / 10,  # rescale by a factor of 10
+         censored = as.numeric(is.na(rt_sec)))
+library(brms)
+# This can take quite a few hours
+m4_brm <- brm(rt_sec2 | cens(censored) ~ c_mean * c_sal * (oldage + yrs65) +
+                (c_mean * c_sal | id) +  
+                (oldage + yrs65 | Item),  # five random slopes
+              prior = c(prior(normal(0, 1), class = "b"),
+                        prior(lkj(2), class = "cor")),
+              control = list(adapt_delta = .99, max_treedepth = 15), 
+              iter = 800L, chains = 2L, cores = 2L,
+              family = exgaussian,
+              data = driving_dat)
+```
+
+```{r eval=FALSE}
+m4_brm
+pp_check(m4_brm)
+marginal_effects(m4_brm)
+```
+
+
+
