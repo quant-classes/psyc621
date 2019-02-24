@@ -1,0 +1,287 @@
+---
+title: "Running Longitudinal Data Analysis in R"
+output:
+  html_notebook:
+    toc: yes
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+---
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment = ">#")
+```
+
+We use the `CurranData.sav` file to demonstrate the analyses here. 
+
+# 1. Importing Data Into R
+
+We'll import the data in .sav format. 
+
+```{r import_sav, message=FALSE}
+# install.packages("tidyverse")  # if you haven't installed the `tidyverse` package
+library(tidyverse)
+theme_set(theme_bw())
+library(haven)
+# Read in the data (pay attention to the directory)
+curran_wide <- read_sav("../data/CurranData.sav")
+curran_wide  # print the first 10 rows
+```
+
+To perform multilevel analysis, we need to restructure the data from a wide
+format to a long format:
+
+```{r}
+# This is just a demonstration with 2 people
+curran_wide %>% 
+  head(3) %>% 
+  # gather() gathers 8 columns to 1 (including both `anti` and `read`)
+  gather(key = "var", value = "val", anti1:anti4, read1:read4) %>%
+  # separate() split the column `var` into two new columns, with `sep = 4` 
+  #   splitting the first 4 characters and the 5th to the end. 
+  separate(col = var, into = c("var", "time"), sep = 4) %>%
+  # spread() spreads the val column to one for `anti` and one for `read`
+  spread(key = var, value = val) %>%
+  # finally, change `time` to a numeric variable
+  mutate(time = as.numeric(time))
+```
+
+
+```{r restructure}
+curran_long <- curran_wide %>% 
+  # gather() gathers 8 columns to 1 (including both `anti` and `read`)
+  gather(key = "var", value = "val", anti1:anti4, read1:read4) %>%
+  # separate() split the column `var` into two new columns, with `sep = 4` 
+  #   splitting the first 4 characters and the 5th to the end. 
+  separate(col = var, into = c("var", "time"), sep = 4) %>%
+  # spread() spreads the val column to one for `anti` and one for `read`
+  spread(key = var, value = val) %>%
+  # finally, change `time` to a numeric variable
+  mutate(time = as.numeric(time))
+curran_long %>% select(id, anti, read, time, everything())
+```
+
+# 2. Data Exploration
+
+```{r}
+curran_long %>% 
+    select(time, kidage, homecog, anti, read) %>% 
+    psych::pairs.panels(jiggle = TRUE, factor = 0.5, ellipses = FALSE, 
+                        cex.cor = 1, cex = 0.5)
+```
+
+What distinguishes longitudinal data from usual cross-sectional multilevle data
+is the _temporal ordering_. In the example of students nested within schools, 
+we don't say that student 1 is naturally before student 2, and it doesn't really
+matter if one just reorder the students. However, in longitudinal data such
+temporal sequence is very important, and we cannot simply rearrange the 
+observation at time 2 to be at time 1. A related concern is the presence of
+autocorrelation, with which observations closer in time will be more similar to 
+each other. 
+
+## Spaghetti Plot
+
+```{r plot}
+# Plotting
+p1 <- ggplot(curran_long, aes(x = time, y = read)) + 
+  geom_point() + 
+  geom_line(aes(group = id)) +  # add lines to connect the data for each person
+  # add a mean trajectory
+  stat_summary(fun.y = "mean", col = "red", size = 1, geom = "line")
+p1
+```
+
+We can see that on average there is an increasing trend across time, but also
+there is a lot of variations in each individual's starting point and the 
+trajectory of change. 
+
+We can also plot the trajectory for a random sample of individuals:
+
+```{r}
+curran_long %>% 
+  # randomly sample 40 individuals
+  filter(id %in% sample(unique(id), 40)) %>% 
+  ggplot(aes(x = time, y = read)) + 
+  geom_point() + 
+  geom_line() +  # add lines to connect the data for each person
+  facet_wrap( ~ id, ncol = 10)
+```
+
+## Temporal Covariances and Correlations
+
+```{r}
+# Easier with the wide data set
+# Covariance matrix:
+curran_wide %>% 
+  select(starts_with("read")) %>% 
+  cov(use = "complete") %>%   # listwise deletion
+  round(2L)  # two decimal places
+# Correlation matrix
+curran_wide %>% 
+  select(starts_with("read")) %>% 
+  cor(use = "complete") %>%   # listwise deletion
+  round(2L)  # two decimal places
+```
+
+You can see the variances increase over time, and the correlation is generally
+stronger for observations closer in time. 
+
+
+# 3. Linear Growth Models
+
+## Simple Random Intercept Model With Time
+
+```{r m00, message=FALSE}
+# # Fit a random intercept model (not commonly done)
+library(lme4)  # use `nlme` to allow for complex residual structures
+library(lmerTest)  # load `lmerTest` for testing fixed effects
+m00 <- lmer(read ~ (1 | id), data = curran_long)
+summary(m00)
+```
+
+```{r m0, results='hide'}
+# Make 0 the initial time
+curran_long <- curran_long %>% mutate(time = time - 1)
+# Fit a linear growth model with no random slopes (not commonly done)
+m0 <- lmer(read ~ time + (1 | id), data = curran_long)
+summary(m0)
+```
+
+## Linear Growth Curve Analysis/Latent Growth Model
+
+```{r m_gca, results='hide'}
+# This takes about a minute
+m_gca <- lmer(read ~ time + (time | id), data = curran_long)
+```
+
+```{r}
+summary(m_gca)
+```
+
+```{r}
+# Plot the predicted growth shape (in blue):
+p1 + geom_abline(intercept = fixef(m_gca)[1] - fixef(m_gca)[2], 
+                 slope = fixef(m_gca)[2], col = "blue", size = 2)
+```
+
+```{r}
+# Add predicted lines to individual trajectories
+curran_long %>% 
+  drop_na(time, read, id) %>%  # remove missing rows
+  mutate(.fitted = predict(m_gca)) %>% 
+  # randomly sample 40 individuals
+  filter(id %in% sample(unique(id), 40)) %>% 
+  ggplot(aes(x = time, y = read)) + 
+  geom_point() + 
+  geom_line() +  # add lines to connect the data for each person
+  # add predicted line with `geom_smooth()`
+  geom_smooth(aes(y = .fitted), method = "lm", se = FALSE) + 
+  facet_wrap( ~ id, ncol = 10)
+```
+
+# 3. Adding Covariates
+
+## Time-Invariant Covariate
+
+Adding `homecog` as a time-invariant (i.e., lv-2) predictor:
+
+```{r m_homecog}
+ggplot(data = curran_long, aes(x = homecog, y = read)) + 
+  geom_point() + geom_smooth()
+
+m_homecog <- lmer(read ~ time + homecog + (time | id), data = curran_long)
+summary(m_homecog)
+```
+
+### Cross-Level Interaction
+
+Adding `homecog` $\times$ `time` interaction:
+
+```{r m_homecogxtime}
+m_cogxtime <- lmer(read ~ homecog * time + (time | id), data = curran_long)
+summary(m_cogxtime)
+```
+
+```{r plot_cogxtime, eval=FALSE}
+# I commented out the order code below as it's easier with the
+# `sjPlot::plot_model()` function
+# # Create a data frame for the intercepts and slopes at homecog = 1, 5, 10, 14
+# pred_dat <- data_frame(time = c(1, 1, 1, 1, 4, 4, 4, 4),    # pseudo ID
+#                        homecog = c(1, 5, 10, 14, 1, 5, 10, 14)) %>%
+#   # Compute predicted values
+#   mutate(fitted = predict(m_cogxtime, newdata = ., 
+#                        re.form = NA))  # no random effects in prediction
+# 
+# ggplot(data = pred_dat, 
+#        aes(x = time, y = fitted, 
+#            group = factor(homecog), 
+#            col = factor(homecog))) +   # use `homecog` for coloring lines
+#   geom_smooth(method = "lm", se = FALSE) + 
+#   labs(y = "Predicted read")
+```
+
+```{r}
+sjPlot::plot_model(m_cogxtime, type = "pred", 
+                   terms = c("time", "homecog [0, 1, 5, 10, 14]"))
+```
+
+### Effect size
+
+```{r eff_size, warning = FALSE, message=FALSE}
+mlm_r2 <- function(x, ci = TRUE, 
+                   nsim = 999,  # Some replications may fail, so double check
+                   .progress = "txt", ...) {
+  boot_r2 <- lme4::bootMer(x, function(x) sjstats::r2(x)$rsq.marginal, 
+                           nsim = nsim, .progress = .progress, ...)
+  cat("\nCompleted", length(boot_r2$t), "bootstrap samples\n")
+  boot_r2$R <- length(boot_r2$t)
+  boot_r2_ci <- boot::boot.ci(boot_r2, type = "perc")$perc[4:5]
+  setNames(c(boot_r2$t0, boot_r2_ci[1], boot_r2_ci[2]), 
+           c("Marginal R2", "ci_ll", "ci_ul"))
+}
+mlm_r2(m_cogxtime)
+```
+
+
+### Diagnostic plots
+
+There are some non-linear trend in the plot. 
+
+```{r}
+# Augment the data with the fitted values and the standardized residuals
+resid_df <- curran_long %>% 
+  drop_na(time, read, homecog, id) %>% 
+  mutate(.std_resid = resid(m_cogxtime, scaled = TRUE), 
+         .fitted = fitted(m_cogxtime))
+# Residual vs. homecog
+p1 <- ggplot(resid_df, 
+       aes(x = homecog, y = .std_resid)) + 
+  geom_point(size = 0.5, alpha = 0.5) +  # show the points
+  geom_smooth(se = FALSE) +  # add a smoother
+  labs(y = "Standardized residuals")
+# Residual vs. time
+p2 <- ggplot(resid_df, 
+       aes(x = time, y = .std_resid)) + 
+  geom_jitter(height = 0, width = 0.1, 
+              size = 0.5, alpha = 0.5) +  # show the points
+  stat_summary(fun.y = "mean", col = "blue", geom = "line") +  # add a smoother
+  labs(y = "Standardized residuals")
+# Residual vs. fitted
+p3 <- ggplot(resid_df, 
+       aes(x = .fitted, y = .std_resid)) + 
+  geom_point(size = 0.5, alpha = 0.5) +  # show the points
+  geom_smooth(se = FALSE) +  # add a smoother
+  labs(y = "Standardized residuals", x = "Fitted values")
+gridExtra::grid.arrange(p1, p2, p3, nrow = 2L)
+```
+
+And here is mild deviation from normality
+
+```{r}
+library(lattice)  # use the `lattice` package to do Q-Q plot
+qqmath(m_cogxtime)
+qqmath(ranef(m_cogxtime, condVar = FALSE), 
+       panel = function(x) {  
+         panel.qqmath(x)
+         panel.qqmathline(x)
+       })
+```
+
