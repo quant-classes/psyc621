@@ -1,0 +1,622 @@
+---
+title: "Running Longitudinal Data Analysis in R"
+output:
+  html_notebook:
+    toc: yes
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+---
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment = ">#")
+```
+
+We use the `CurranData.sav` file to demonstrate the analyses here. 
+
+# 1. Importing Data Into R
+
+We'll import the data in .sav format. 
+
+```{r import_sav, message=FALSE}
+# install.packages("tidyverse")  # if you haven't installed the `tidyverse` package
+library(tidyverse)
+theme_set(theme_bw())
+library(haven)
+# Read in the data (pay attention to the directory)
+curran_wide <- read_sav("../data/CurranData.sav")
+curran_wide  # print the first 10 rows
+```
+
+To perform multilevel analysis, we need to restructure the data from a wide
+format to a long format:
+
+```{r}
+# This is just a demonstration with 2 people
+curran_wide %>% 
+  head(3) %>% 
+  # gather() gathers 8 columns to 1 (including both `anti` and `read`)
+  gather(key = "var", value = "val", anti1:anti4, read1:read4) %>%
+  # separate() split the column `var` into two new columns, with `sep = 4` 
+  #   splitting the first 4 characters and the 5th to the end. 
+  separate(col = var, into = c("var", "time"), sep = 4) %>%
+  # spread() spreads the val column to one for `anti` and one for `read`
+  spread(key = var, value = val) %>%
+  # finally, change `time` to a numeric variable
+  mutate(time = as.numeric(time))
+```
+
+
+```{r restructure}
+curran_long <- curran_wide %>% 
+  # gather() gathers 8 columns to 1 (including both `anti` and `read`)
+  gather(key = "var", value = "val", anti1:anti4, read1:read4) %>%
+  # separate() split the column `var` into two new columns, with `sep = 4` 
+  #   splitting the first 4 characters and the 5th to the end. 
+  separate(col = var, into = c("var", "time"), sep = 4) %>%
+  # spread() spreads the val column to one for `anti` and one for `read`
+  spread(key = var, value = val) %>%
+  # finally, change `time` to a numeric variable
+  mutate(time = as.numeric(time))
+curran_long %>% select(id, anti, read, time, everything())
+```
+
+# 2. Data Exploration
+
+```{r}
+curran_long %>% 
+    select(time, kidage, homecog, anti, read) %>% 
+    psych::pairs.panels(jiggle = TRUE, factor = 0.5, ellipses = FALSE, 
+                        cex.cor = 1, cex = 0.5)
+```
+
+What distinguishes longitudinal data from usual cross-sectional multilevel data
+is the _temporal ordering_. In the example of students nested within schools, 
+we don't say that student 1 is naturally before student 2, and it doesn't really
+matter if one just reorder the students. However, in longitudinal data such
+temporal sequence is very important, and we cannot simply rearrange the 
+observation at time 2 to be at time 1. A related concern is the presence of
+autocorrelation, with which observations closer in time will be more similar to 
+each other. 
+
+## Spaghetti Plot
+
+```{r plot}
+# Plotting
+p1 <- ggplot(curran_long, aes(x = time, y = read)) + 
+  geom_point() + 
+  geom_line(aes(group = id)) +  # add lines to connect the data for each person
+  # add a mean trajectory
+  stat_summary(fun.y = "mean", col = "red", size = 1, geom = "line")
+p1
+```
+
+We can see that on average there is an increasing trend across time, but also
+there is a lot of variations in each individual's starting point and the 
+trajectory of change. 
+
+We can also plot the trajectory for a random sample of individuals:
+
+```{r}
+curran_long %>% 
+  # randomly sample 40 individuals
+  filter(id %in% sample(unique(id), 40)) %>% 
+  ggplot(aes(x = time, y = read)) + 
+  geom_point() + 
+  geom_line() +  # add lines to connect the data for each person
+  facet_wrap( ~ id, ncol = 10)
+```
+
+## Temporal Covariances and Correlations
+
+```{r}
+# Easier with the wide data set
+# Covariance matrix:
+curran_wide %>% 
+  select(starts_with("read")) %>% 
+  cov(use = "complete") %>%   # listwise deletion
+  round(2L)  # two decimal places
+# Correlation matrix
+curran_wide %>% 
+  select(starts_with("read")) %>% 
+  cor(use = "complete") %>%   # listwise deletion
+  round(2L)  # two decimal places
+```
+
+You can see the variances increase over time, and the correlation is generally
+stronger for observations closer in time. 
+
+
+# 3. Linear Growth Models
+
+## Simple Random Intercept Model With Time
+
+```{r m00, message=FALSE}
+# # Fit a random intercept model (not commonly done)
+library(lme4)  # use `nlme` to allow for complex residual structures
+library(lmerTest)  # load `lmerTest` for testing fixed effects
+m00 <- lmer(read ~ (1 | id), data = curran_long)
+summary(m00)
+```
+
+```{r m0, results='hide'}
+# Make 0 the initial time
+curran_long <- curran_long %>% mutate(time = time - 1)
+# Fit a linear growth model with no random slopes (not commonly done)
+m0 <- lmer(read ~ time + (1 | id), data = curran_long)
+summary(m0)
+```
+
+## Linear Growth Curve Analysis/Latent Growth Model
+
+```{r m_gca, results='hide'}
+# This takes about a minute
+m_gca <- lmer(read ~ time + (time | id), data = curran_long)
+```
+
+```{r}
+summary(m_gca)
+```
+
+```{r}
+# Plot the predicted growth shape (in blue):
+p1 + geom_abline(intercept = fixef(m_gca)[1] - fixef(m_gca)[2], 
+                 slope = fixef(m_gca)[2], col = "blue", size = 2)
+```
+
+```{r}
+# Add predicted lines to individual trajectories
+curran_long %>% 
+  drop_na(time, read, id) %>%  # remove missing rows
+  mutate(.fitted = predict(m_gca)) %>% 
+  # randomly sample 40 individuals
+  filter(id %in% sample(unique(id), 40)) %>% 
+  ggplot(aes(x = time, y = read)) + 
+  geom_point() + 
+  geom_line() +  # add lines to connect the data for each person
+  # add predicted line with `geom_line()`
+  geom_line(aes(y = .fitted), col = "purple") + 
+  facet_wrap( ~ id, ncol = 10)
+```
+
+# 4. Time-Invariant Covariate
+
+Adding `homecog` as a time-invariant (i.e., lv-2) predictor:
+
+```{r m_homecog}
+ggplot(data = curran_long, aes(x = homecog, y = read)) + 
+  geom_point() + geom_smooth()
+
+m_homecog <- lmer(read ~ time + homecog + (time | id), data = curran_long)
+summary(m_homecog)
+```
+
+## Cross-Level Interaction
+
+Adding `homecog` $\times$ `time` interaction:
+
+```{r m_homecogxtime}
+m_cogxtime <- lmer(read ~ homecog * time + (time | id), data = curran_long)
+summary(m_cogxtime)
+```
+
+```{r plot_cogxtime, eval=FALSE}
+# I commented out the order code below as it's easier with the
+# `sjPlot::plot_model()` function
+# # Create a data frame for the intercepts and slopes at homecog = 1, 5, 10, 14
+# pred_dat <- data_frame(time = c(1, 1, 1, 1, 4, 4, 4, 4),    # pseudo ID
+#                        homecog = c(1, 5, 10, 14, 1, 5, 10, 14)) %>%
+#   # Compute predicted values
+#   mutate(fitted = predict(m_cogxtime, newdata = ., 
+#                        re.form = NA))  # no random effects in prediction
+# 
+# ggplot(data = pred_dat, 
+#        aes(x = time, y = fitted, 
+#            group = factor(homecog), 
+#            col = factor(homecog))) +   # use `homecog` for coloring lines
+#   geom_smooth(method = "lm", se = FALSE) + 
+#   labs(y = "Predicted read")
+```
+
+```{r}
+sjPlot::plot_model(m_cogxtime, type = "pred", 
+                   terms = c("time", "homecog [0, 1, 5, 10, 14]"))
+```
+
+### Effect size
+
+```{r eff_size, warning = FALSE, message=FALSE}
+mlm_r2 <- function(x, ci = TRUE, 
+                   nsim = 999,  # Some replications may fail, so double check
+                   .progress = "txt", ...) {
+  boot_r2 <- lme4::bootMer(x, function(x) sjstats::r2(x)$rsq.marginal, 
+                           nsim = nsim, .progress = .progress, ...)
+  cat("\nCompleted", length(boot_r2$t), "bootstrap samples\n")
+  boot_r2$R <- length(boot_r2$t)
+  boot_r2_ci <- boot::boot.ci(boot_r2, type = "perc")$perc[4:5]
+  setNames(c(boot_r2$t0, boot_r2_ci[1], boot_r2_ci[2]), 
+           c("Marginal R2", "ci_ll", "ci_ul"))
+}
+mlm_r2(m_cogxtime)
+```
+
+
+### Diagnostic plots
+
+There are some non-linear trend in the plot. 
+
+```{r}
+# Augment the data with the fitted values and the standardized residuals
+resid_df <- curran_long %>% 
+  drop_na(time, read, homecog, id) %>% 
+  mutate(.std_resid = resid(m_cogxtime, scaled = TRUE), 
+         .fitted = fitted(m_cogxtime))
+# Residual vs. homecog
+p1r <- ggplot(resid_df, 
+       aes(x = homecog, y = .std_resid)) + 
+  geom_point(size = 0.5, alpha = 0.5) +  # show the points
+  geom_smooth(se = FALSE) +  # add a smoother
+  labs(y = "Standardized residuals")
+# Residual vs. time
+p2r <- ggplot(resid_df, 
+       aes(x = time, y = .std_resid)) + 
+  geom_jitter(height = 0, width = 0.1, 
+              size = 0.5, alpha = 0.5) +  # show the points
+  stat_summary(fun.y = "mean", col = "blue", geom = "line") +  # add a smoother
+  labs(y = "Standardized residuals")
+# Residual vs. fitted
+p3r <- ggplot(resid_df, 
+       aes(x = .fitted, y = .std_resid)) + 
+  geom_point(size = 0.5, alpha = 0.5) +  # show the points
+  geom_smooth(se = FALSE) +  # add a smoother
+  labs(y = "Standardized residuals", x = "Fitted values")
+gridExtra::grid.arrange(p1r, p2r, p3r, nrow = 2L)
+```
+
+And here is mild deviation from normality
+
+```{r}
+library(lattice)  # use the `lattice` package to do Q-Q plot
+qqmath(m_cogxtime)
+qqmath(ranef(m_cogxtime, condVar = FALSE), 
+       panel = function(x) {  
+         panel.qqmath(x)
+         panel.qqmathline(x)
+       })
+```
+
+# 5. Alternative Growth Shape
+
+Although MLM is a "linear" model, it does have the capability to model some 
+non-linear growth shape. The key lies on the ability to expand the original 
+coding of time, and one example, the piecewise growth model, is shown below:
+
+## Piecewise Growth Model
+
+A piecewise linear growth assumes that there are two or more phases of linear
+change across time. For example, we can assume that, for our data, phase 1 is
+from Time 0 to Time 1, and phase 2 is from Time 1 to Time 3. 
+
+Because we're estimating two slopes, we need two predictors: `P1` represents
+the initial slope from Time 0 to Time 1, and `P2` represents the slope from 
+Time 1 to Time 3. The coding is shown below:
+
+$$\begin{bmatrix}
+    \textrm{P1} & \textrm{P2} \\
+    0 & 0 \\
+    1 & 0 \\
+    1 & 1 \\
+    1 & 2
+  \end{bmatrix}$$
+  
+To understand the coding, in P1 the line changes from Time 0 to Time 1, but 
+stays there. P2 has 0 from Time 0 to Time 1 as nothing should have happened. 
+Then, From Time 1 to Time 3 it starts to increase linearly. __One way to check
+whether you've specified the coding correctly is to sum the numbers in every
+row, which you should get back 0, 1, 2, 3, . . .
+
+Below is an example where intercept = 1, growth in phase 1 = 0.5, growth in 
+phase 2 = 0.8. 
+
+The dashed line shows the contribution from P1 (plus the intercept). 
+The red dotted line shows the contribution from P2. 
+
+```{r piecewise_demo}
+demo_df <- tibble(TIME = c(0, 1, 2, 3))
+ggplot(demo_df, aes(x = TIME)) + 
+  stat_function(fun = function(x) 1 + 0.5 * pmin(x, 1), 
+                linetype = "dashed", size = 1.5) + 
+  stat_function(fun = function(x) 0.8 * pmax(x - 1, 0), col = "red", 
+                linetype = "dotted", size = 1.5) + 
+  stat_function(fun = function(x) 1 + 0.5 * pmin(x, 1) + 0.8 * pmax(x - 1, 0))
+```
+
+```{r m_pw}
+# Compute P1 and P2
+curran_long <- curran_long %>% 
+  mutate(P1 = pmin(time, 1),  # anything bigger than 1 becomes 1
+         P2 = pmax(time - 1, 0))  # set time to start at TIME 1, and then make
+                                  # anything smaller than 0 to 0
+# Check the coding:
+curran_long %>% 
+  select(time, P1, P2) %>% 
+  distinct()
+# Fit the piecewise growth model
+m_pw <- lmer(read ~ P1 + P2 + (P1 + P2 | id), 
+             data = curran_long)
+# There's a warning, likely because the random slopes of P1 and P2 are highly
+# correlated
+summary(m_pw)
+```
+
+```{r m_pw_mcmc, results='hide', message=FALSE}
+# Try MCMCglmm
+library(MCMCglmm)
+m_pw_mcmc <- MCMCglmm(fixed = read ~ P1 + P2, 
+                      # Unstructured level-2 covariance matrix
+                      random = ~ us(1 + P1 + P2):id,
+                      data = curran_long, 
+                      prior = list(
+                        # N(0, 1000) prior for intercept
+                        # N(0, 100) prior for P1 and P2
+                        # N(0, 25) prior for interaction 
+                        B = list(mu = c(0, 0, 0), 
+                                 V = diag(c(1000, 100, 100))), 
+                        # weakly informative prior for the variance components
+                        G = list(G1 = list(V = diag(3), nu = 3)),  
+                        R = list(V = 1, nu = 0.002)  # vague prior for sigma-sq
+                      ))
+```
+
+```{r}
+summary(m_pw_mcmc)
+```
+
+### Plotting the predicted trajectories:
+
+On the spaghetti plot:
+
+```{r}
+# Plot the predicted growth shape (in blue):
+pred_pw <- data.frame(time = 1:4, 
+                      P1 = c(0, 1, 1, 1), 
+                      P2 = c(0, 0, 1, 2))
+pred_pw <- pred_pw %>% 
+  mutate(read = predict(m_pw, newdata = pred_pw, re.form = NA))
+p1 + geom_line(data = pred_pw, col = "blue", size = 2, alpha = 0.7)
+```
+
+Individual facets
+
+```{r}
+# Add predicted lines to individual trajectories
+curran_long %>% 
+  drop_na(time, read, id) %>%  # remove missing rows
+  mutate(.fitted = predict(m_pw)) %>% 
+  # randomly sample 40 individuals
+  filter(id %in% sample(unique(id), 40)) %>% 
+  ggplot(aes(x = time, y = read)) + 
+  geom_point() + 
+  geom_line() +  # add lines to connect the data for each person
+  # add predicted line with `geom_line()`
+  geom_line(aes(y = .fitted), col = "purple") + 
+  facet_wrap( ~ id, ncol = 10)
+```
+
+```{r}
+# Compared with the linear model:
+anova(m_gca, m_pw)
+```
+
+### Diagnostic
+
+If you check the residuals, this looks slightly better than the linear model, 
+although it doesn't look perfect:
+
+```{r}
+# Augment the data with the fitted values and the standardized residuals
+resid_df <- curran_long %>% 
+  drop_na(time, read, id) %>% 
+  mutate(.std_resid = resid(m_pw, scaled = TRUE), 
+         .fitted = fitted(m_pw))
+# Residual vs. fitted
+ggplot(resid_df, 
+       aes(x = .fitted, y = .std_resid)) + 
+  geom_point(size = 1, alpha = 0.5) +  # show the points
+  geom_smooth(se = FALSE) +  # add a smoother
+  labs(y = "Standardized residuals", x = "Fitted values")
+```
+
+To learn more about piecewise growth model and quadratic growth model, check
+out this page: http://rpsychologist.com/r-guide-longitudinal-lme-lmer
+
+# 6. Complex Covariance Structures
+
+These require the use of the `glmmTMB` package or the `brms` package. We need
+to first make a categorical version of the time variable:
+
+```{r}
+library(glmmTMB)
+curran_long <- curran_long %>% 
+  mutate(time_cat = factor(time))
+```
+
+
+## Compound Symmetry
+
+This is equivalent to the growth model without random slopes
+
+```{r m_cs, results='hide'}
+m_pw_cs <- glmmTMB(read ~ P1 + P2 + cs(0 + time_cat | id), 
+                   dispformula = ~ 0, 
+                   data = curran_long)
+```
+
+## Autoregressive Covariance Structure
+
+```{r m_lin_ar1, results='hide'}
+m_pw_ar1 <- glmmTMB(read ~ P1 + P2 + ar1(0 + time_cat | id), 
+                    dispformula = ~ 0, 
+                    data = curran_long)
+```
+
+## Saturated Covariance Structure
+
+```{r m_sat, results='hide'}
+m_pw_sat <- glmmTMB(read ~ P1 + P2 + 
+                      (0 + time_cat | id),  # all variances and covariances
+                    dispformula = ~ 0, 
+                    data = curran_long)
+m_sat <- glmmTMB(read ~ 0 + time_cat +   # estimate mean for every time points
+                   (0 + time_cat | id),  # all variances and covariances
+                 dispformula = ~ 0, 
+                 data = curran_long)
+```
+
+## Model Comparisons
+
+We can compare the different growth models (with no covariates) we have fitted:
+
+```{r}
+AIC(refitML(m0), refitML(m_gca), refitML(m_pw), 
+    m_pw_cs, m_pw_ar1, m_pw_sat, m_sat)
+BIC(refitML(m0), refitML(m_gca), refitML(m_pw), 
+    m_pw_cs, m_pw_ar1, m_pw_sat, m_sat)
+```
+
+Based on AIC and BIC, looks like the quadratic model fit even better than the 
+saturated model, but it is easier to interpret. 
+
+# 7. Varying Occasions
+
+MLM can handle varying measurement occasions. For example, maybe some students
+are first measured in September when the semester starts, whereas other students 
+are first measured in October or November. How important this difference depends
+on the research being studied. For especially infant/early childhood research, 
+one month can already mean a lot of growth, and so it is important to take that 
+into account. 
+
+One alternative is to directly use `kidage` instead of `time`. To use age, 
+however, one may not want to start at age = 0. In the data set, the minimum 
+`age` is `r min(curran_long$kidage)`. Therefore, we can subtract 
+`r min(curran_long$kidage)` from the original `kidage` variable, so that
+the zero point represent someone at age = `r min(curran_long$kidage)`. 
+
+Here is an example:
+
+```{r}
+# Subtract age by 6
+curran_long <- curran_long %>% 
+  mutate(kidagetv = kidage + time * 2, 
+         kidage6tv = kidagetv - 6)  # compute the age for each time point
+# Plot the data
+ggplot(curran_long, aes(x = kidage6tv, y = read)) + 
+  geom_point() + 
+  geom_line(aes(group = id)) +  # add lines to connect the data for each person
+  # add a mean trajectory
+  geom_smooth(col = "red", size = 1)
+```
+
+```{r m_age}
+# Fit a quadratic model
+m_agesq <- lmer(read ~ kidage6tv + I(kidage6tv^2) + 
+                  (kidage6tv + I(kidage6tv^2) | id), data = curran_long)
+summary(m_agesq)  # convergence problem; better rerun with Bayes
+```
+
+You can then perform the diagnostics and see whether the individual growth 
+shape appears to be quadratic. 
+
+### Compare Models
+
+```{r}
+anova(m_gca, m_pw, m_agesq)
+```
+
+Using age with a quadratic trend seems to have the best fit. Here is a summary:
+
+```{r, results='asis'}
+texreg::htmlreg(list(m_gca, m_pw, m_agesq), 
+                custom.model.names = c("Linear time", "Piecewise", 
+                                       "Quadratic age"))
+```
+
+### Adding time-invariant covariate
+
+You can similar add `homecog` and its interaction to the model with age as
+predictor. Just that now there are two interaction terms: one with the linear
+trend and the other with the quadratic trend. 
+
+# 8. Time-Varying Covariate
+
+The question is: adjusting for the normative developmental trend, is reading
+score related to (a) general level of anxiety and (b) anxiety level at a
+particular stage?
+
+Adding `anti` as a time-varying (i.e., lv-1) predictor requires separating the
+predictor into its person mean (i.e., trait) as well as the deviation from the
+person mean (i.e., state). 
+
+```{r m_decompose}
+curran_long <- curran_long %>% 
+  group_by(id) %>%
+  mutate(anti_pm = mean(anti, na.rm = TRUE),  # use listwise deletion to compute the person mean
+         anti_pmc = anti - anti_pm, 
+         read_pm = mean(read, an.rm = TRUE),  # get person mean for `read` for plotting only
+         read_pmc = read - read_pm) %>%
+  ungroup()
+```
+
+## Plot the between-person and within-person association
+
+```{r plot_between_within}
+# Obtain the residuals (without random effects):
+ageadj_df <- curran_long %>% 
+  drop_na(kidage6tv, read, id) %>% 
+  mutate(.predicted = predict(m_agesq, re.form = NA), 
+         read_adjage = read - .predicted) %>% 
+  drop_na(anti) %>%   # drop missing values in `anti`
+  mutate(anti_pmc_adjage = 
+           cbind(1, kidage6tv, kidage6tv^2) %>% 
+           qr() %>% qr.resid(anti_pmc), 
+         anti_pm_adjage = 
+           cbind(1, kidage6tv, kidage6tv^2) %>% 
+           qr() %>% qr.resid(anti_pm))
+# Within-person association (adjusting for age trend):
+ggplot(data = ageadj_df, 
+       aes(x = anti_pmc_adjage, y = read_adjage)) + 
+  geom_point(aes(col = factor(id))) + 
+  geom_smooth(aes(col = factor(id)), alpha = 0.5, size = 0.3, 
+              method = "lm", se = FALSE) +
+  geom_smooth() +
+  guides(col = FALSE)
+# Between-person association:
+ggplot(data = ageadj_df, 
+       aes(x = anti_pm_adjage, y = read_adjage)) + 
+  geom_point(aes(col = factor(id))) + 
+  geom_smooth() +
+  guides(col = FALSE)
+```
+
+```{r m_tvc}
+# No convergence with `lme4`. Try MCMCglmm:
+m_tvc_mcmc <- MCMCglmm(fixed = read ~ kidage6tv + I(kidage6tv^2) + 
+                         anti_pm + anti_pmc, 
+                       # Unstructured level-2 covariance matrix
+                       random = ~ us(1 + kidage6tv + I(kidage6tv^2) + 
+                                       anti_pmc):id,
+                       data = curran_long %>%  # need to drop cases with missing
+                         drop_na(read, anti),  # values in the predictors
+                       prior = list(
+                         # N(0, 1000) prior for intercept
+                         # N(0, 100) prior for P1 and P2
+                         # N(0, 25) prior for interaction 
+                         B = list(mu = c(0, 0, 0, 0, 0), 
+                                  V = diag(c(1000, 100, 25, 100, 100))), 
+                         # weakly informative prior for the variance components
+                         G = list(G1 = list(V = diag(4), nu = 4)),  
+                         R = list(V = 1, nu = 0.002)  # vague prior for sigma-sq
+                       ))
+summary(m_tvc_mcmc)  # different between and within associations
+```
+
+You can further examine interactions of `anti_pm` and `anti_pmc` with the time
+trends. 
