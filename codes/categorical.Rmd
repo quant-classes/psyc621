@@ -1,0 +1,503 @@
+---
+title: "Multilevel Models for Categorical Outcomes in R"
+author: "Mark Lai"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output: 
+  html_document:
+    toc: TRUE
+---
+
+<!-- # Categorical Outcomes -->
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment = ">#")
+```
+
+We use different data sets to demonstrate the analyses. 
+
+## Normal Model
+
+We'll use the `epilepsy` data you used in HW 3 for demonstration:
+
+### Import and explore data
+
+```{r import_sav, message=FALSE}
+library(tidyverse)
+theme_set(theme_bw())
+# Read in the data (pay attention to the directory)
+epilepsy_dat <- read_csv("../data/epilepsy.csv")
+# Plot the association between `base` and `seizure.rate`
+p1 <- ggplot(epilepsy_dat, aes(x = base, y = seizure.rate)) + 
+  geom_point(aes(col = factor(subject))) + 
+  geom_smooth() + 
+  guides(col = FALSE)
+p1
+```
+
+It's quite clear that a normal model may not fit the data well, due to 
+non-linearity, non-normality, and heterogeneity of variance. Let's explore 
+with our regular multilevel model.
+
+```{r m1}
+library(lme4)
+library(lmerTest)
+library(brms)
+# Build a multilevel model with `seizure.rate` as a normal outcome and base 
+#   as a predictor. To compare with a later model, I will add 0.5 to 
+#   the outcome count
+epilepsy_dat <- epilepsy_dat %>% 
+  mutate(seizure.rate_0.5 = seizure.rate + 0.5)
+m1 <- lmer(seizure.rate_0.5 ~ base + (1 | subject), data = epilepsy_dat)
+summary(m1, ddf = "Kenward-Roger")  # need K-R for small sample
+```
+
+Here is the predicted mean regression line (in red, which clearly does not fit):
+
+```{r m1_predict}
+library(sjPlot)
+plot_model(m1, type = "slope", show.data = TRUE)
+# p1 + 
+#   geom_abline(intercept = fixef(m1)[1], slope = fixef(m1)[2], col = "red")
+```
+
+Here are some quick diagnostic plots from the `sjPlot` package (just for quick
+exploration):
+
+```{r m1_diag, results='hide'}
+m1_pdiag <- plot_model(m1, type = "diag", show.data = TRUE)
+# plot_grid(m1_pdiag)  # not working
+# Need to unlist the 2nd element
+m1_pdiag[2] <- unlist(m1_pdiag[2], recursive = FALSE)
+gridExtra::grid.arrange(grobs = m1_pdiag)
+```
+
+### Using `glmmTMB`
+
+To illustrate that a regular multilevel model is a special case under the
+generalized linear mixed model framework, we'll run the model using `glmmTMB`. A
+normal model is a special case of a GLM with a normal conditional distribution
+of the outcome and an identity link. We can refit the model using the 
+`glmmTMB` function:
+
+```{r m1_glmm}
+# m1_glmm <- glmer(seizure.rate_0.5 ~ base + (1 | subject), data = epilepsy_dat, 
+#                  # Specify a normal distribution with identity link
+#                  family = gaussian(link = "identity"))
+library(glmmTMB)
+m1_glmm <- glmmTMB(seizure.rate_0.5 ~ base + (1 | subject), 
+                   data = epilepsy_dat, 
+                   family = gaussian(link = "identity"))
+summary(m1_glmm)
+```
+
+The results are the same (other than that ML is used instead of REML)
+
+## Normal Model With a Different Link Function
+
+Now, we can actually use a different link function. For count variables, a 
+`log` link is a common choice to model the non-linearity and the skewness. 
+
+```{r m1_log}
+# m1_log <- glmer(seizure.rate_0.5 ~ base + (1 | subject), data = epilepsy_dat, 
+#                 # Specify a normal distribution with log link
+#                 family = gaussian(link = "log"))
+# summary(m1_log)
+m1_log <- glmmTMB(seizure.rate_0.5 ~ base + (1 | subject), 
+                  data = epilepsy_dat, 
+                  # Specify a normal distribution with log link
+                  family = gaussian(link = "log"))
+summary(m1_log)
+```
+
+The normal model with identity link is written as (ignoring the random effect
+for simplicity):
+\begin{align}
+  Y_i & \sim \mathcal{N}(\mu_i, \sigma^2)  \\
+  \mu_i & = \eta_i  \\
+  \eta_i & = \beta_0 + \beta_1 X_i
+\end{align}
+
+The normal model with identity link is written as (ignoring the random effect
+for simplicity):
+\begin{align}
+  Y_i & \sim \mathcal{N}(\mu_i, \sigma^2)  \\
+  {\color{red}{\log}}(\mu_i) & = \eta_i  \\
+  \eta_i & = \beta_0 + \beta_1 X_i
+\end{align}
+
+See the difference below:
+
+```{r m1_glm_predict}
+tibble(base = seq(from = min(epilepsy_dat$base), 
+                  to = max(epilepsy_dat$base), length.out = 101)) %>% 
+  mutate(identity = fixef(m1)[1] + fixef(m1)[2] * base, 
+         log = exp(fixef(m1_log)[[1]][1] + 
+                          fixef(m1_log)[[1]][2] * base)) %>% 
+  gather("link", "yhat", -base) %>% 
+  ggplot(aes(x = base, y = yhat, col = link)) + 
+  geom_line() + 
+  facet_wrap(~ link)
+```
+
+This models a curvillinear relationship, although it still appears off. 
+The model fit is slightly better with AIC:
+
+```{r compare_m1_m1_log}
+AIC(m1_glmm, m1_log)
+```
+
+Note that models with different link functions and different distributions may
+not be comparable. As a quick rule, model comparison using information criteria
+is not meaningful when comparing continuous distribution (e.g., normal) and 
+discrete distribution (e.g., Poisson). 
+
+## Logistic Model
+
+We will use the same High School & Beyond survey data earlier in the course, 
+but with the `mathach` variable dichotomized, and with a subset consisting of 
+a random sample of 30 schools
+
+```{r hsbsub_bin}
+# Create a subset of the HSB data with a binary outcome score
+hsball <- haven::read_sav("../data/hsball.sav")
+# Randomly sample 30 schools
+set.seed(317)
+sch_sel <- sample(unique(hsball$id), 30L)
+hsbsub_bin <- hsball %>% filter(id %in% sch_sel) %>%
+  mutate(mathpass = if_else(mathach >= 12, 1, 0), 
+         ses_gpc = ses - meanses)
+# haven::write_sav(hsbsub_bin, "../data/hsbsub_bin.sav")  # export the data
+```
+
+Alternatively, import the data I provided directly:
+
+```{r, eval=FALSE}
+hsbsub_bin <- haven::read_sav("../data/hsbsub_bin.sav")
+```
+
+### Random Intercept Model
+
+A logistic model is a model where the outcome is assumed to follow a Bernoulli
+(or binomial for counts) and the link function is **logit**. 
+
+We can fit a random intercept model in a similar way as for continuous outcome:
+
+```{r m0}
+m0 <- glmmTMB(mathpass ~ (1 | id), 
+              data = hsbsub_bin, 
+              # Binomial distribution with logit link 
+              family = binomial(link = "logit"))
+summary(m0)
+```
+
+It takes a little bit more work for interpretation. Check the slides. 
+
+### Adding Predictors
+
+Let's add `ses` to the model as a predictor (decomposed into lv-1 and lv-2 
+effects). Note that with GLMM, results can be different depending on the 
+optimization procedure used
+
+```{r decomp, message=FALSE}
+# Penalized quasi-likelihood with the `glmmPQL` function in the MASS package 
+# (not recommended)
+decomp_pql <- MASS::glmmPQL(mathpass ~ ses_gpc + meanses, random = ~ 1 | id, 
+                            data = hsbsub_bin, 
+                            # Binomial distribution with logit link 
+                            family = binomial(link = "logit"))
+# Laplace approximation, which is the default for `lme4`
+decomp_laplace <- glmer(mathpass ~ ses_gpc + meanses + (1 | id), data = hsbsub_bin, 
+                # Binomial distribution with logit link 
+                family = binomial(link = "logit"),
+                nAGQ = 1)
+# Adaptive Gauss-Hermite quadrature (with 9 integration point; more accurate)
+decomp_agq <- glmer(mathpass ~ ses_gpc + meanses + (1 | id), data = hsbsub_bin, 
+                    # Binomial distribution with logit link 
+                    family = binomial(link = "logit"),
+                    nAGQ = 9)  # AGHQ with 9 integration points
+summary(decomp_agq)
+# Optimization with glmmTMB
+decomp <- glmmTMB(mathpass ~ ses_gpc + meanses + (1 | id), 
+                  data = hsbsub_bin, 
+                  # Binomial distribution with logit link 
+                  family = binomial(link = "logit"))
+summary(decomp)
+```
+
+#### Predicted probabilities
+
+Here are the model-implied probabilities with respect to `meanses` and 
+`ses_gpc`.
+
+```{r pred_prob_plots}
+# # Plot the predicted probabilities
+# # meanses
+# ggplot(hsbsub_bin, aes(x = meanses, y = mathpass)) + 
+#   stat_function(fun = function(x) {
+#     plogis(fixef(decomp)[[1]][1] + fixef(decomp)[[1]][3] * x)
+#   }, col = "red") + 
+#   xlim(-2, 2)
+# # ses_gpc
+# ggplot(hsbsub_bin, aes(x = ses_gpc, y = mathpass)) + 
+#   stat_function(fun = function(x) {
+#     plogis(fixef(decomp)[[1]][1] + fixef(decomp)[[1]][2] * x + 
+#            fixef(decomp)[[1]][3] * mean(hsbsub_bin$meanses))
+#   }, col = "red") + 
+#   xlim(-2, 2)
+# Can use the sjPlot::plot_model() function
+plot_model(decomp, type = "eff", show.data = TRUE)
+```
+
+You can obtain the specific predicted probability with the `predict` function,
+but at the time of writing this note it's only available with the `lme4`
+package. For example, if `ses_gpc` = 1 and `meanses` = -1,
+
+```{r pred_prob}
+predict(decomp_agq, newdata = data.frame(ses_gpc = 1, meanses = -1), 
+        re.form = NA,  # not using the random effects for prediction
+        type = "response")  # change to probability unit
+```
+
+### Random Slopes
+
+Random slopes can be added, just like in normal multilevel models. Just pay
+attention that the random slope variance is in logit unit. 
+
+```{r, message=FALSE}
+# Random slope (AGHQ not possible with lme4)
+ran_slp_laplace <- glmer(mathpass ~ ses_gpc + meanses + (ses_gpc | id), 
+                         data = hsbsub_bin, 
+                         # Binomial distribution with logit link 
+                         family = binomial(link = "logit"),
+                         nAGQ = 1)  # Laplace approximation, which is the default
+# Random slope with PQL
+ran_slp_pql <- MASS::glmmPQL(mathpass ~ ses_gpc + meanses, random = ~ ses_gpc | id, 
+                             data = hsbsub_bin, 
+                             # Binomial distribution with logit link 
+                             family = binomial(link = "logit"), 
+                             control = list(opt = "optim"))  # different optimization algorithm
+ran_slp <- glmmTMB(mathpass ~ ses_gpc + meanses + (ses_gpc | id), 
+                   data = hsbsub_bin, 
+                   # Binomial distribution with logit link 
+                   family = binomial(link = "logit"))
+```
+
+Note that there is a convergence problem where the correlation between the 
+random intercept and the random slope was estimated to be -1.0. Adaptive 
+quadrature was not allowed currently in `glmer()` with random slopes
+
+```{r, results='asis'}
+# Use the `htmlreg` function (glmmTMB not yet supported)
+# texreg::htmlreg(list(decomp_pql, decomp_laplace, decomp_agq, 
+#                      ran_slp_pql, ran_slp_laplace), 
+#                 custom.model.names = c("Decomp (PQL)", 
+#                                        "Decomp (Laplace)", 
+#                                        "Decomp (AGHQ, n = 9)",
+#                                        "Random Slope (PQL)", 
+#                                        "Random Slope (Laplace)"), 
+#                 stars = c(.05))
+# Use the `sjPlot::tab_model()` function
+# It uses odds ratios by default
+sjPlot::tab_model(decomp_pql, decomp_laplace, decomp_agq, decomp,
+                  show.p = FALSE, show.r2 = FALSE, show.icc = FALSE, 
+                  show.aic = TRUE, 
+                  dv.labels = c("PQL", "Laplace", "AGQ", "glmmTMB"))
+```
+
+### Bayesian estimation
+
+MCMC is generally more accurate for non-normal outcomes, and may be the only 
+choice for complex models. Here I use the `brms` package to fit the same
+random slope model:
+
+```{r ran_slp_mcmc, results='hide', cache=TRUE}
+# Bayesian:
+ran_slp_mcmc <- brm(mathpass ~ ses_gpc + meanses + (ses_gpc | id), 
+                    data = hsbsub_bin, 
+                    # brms uses `bernoulli` instead of `binomial` for binary y
+                    family = bernoulli(link = "logit"), 
+                    # prior recommended in STAN for logistic regression
+                    prior = prior(student_t(4, 0, 2.5), class = b), 
+                    chains = 2L, iter = 1000L)
+```
+
+```{r}
+ran_slp_mcmc
+# Show the predicted effect:
+plot(marginal_effects(ran_slp_mcmc), ask = FALSE)
+```
+
+Note that the estimate for the random slope variance is much larger. 
+
+```{r, results='asis'}
+sjPlot::tab_model(ran_slp_pql, ran_slp_laplace, ran_slp, ran_slp_mcmc, 
+                  show.p = FALSE, show.r2 = FALSE, show.icc = FALSE, 
+                  show.aic = TRUE, 
+                  dv.labels = c("PQL", "Laplace", "glmmTMB", "MCMC"))
+```
+
+### Hypothesis Testing and Confidence Intervals
+
+```{r}
+# Likelihood-based CI for fixed effects (in positions 1 to 3, takes a while)
+confint(ran_slp, parm = 1:3, method = "uniroot")
+```
+
+<!-- ```{r boot_ci, message=FALSE, warning=FALSE, error=FALSE, eval=FALSE} -->
+<!-- # CI with parametric bootstrap (1000 resamples; take a long time) -->
+<!-- confint(ran_slp, parm = "beta_", method = "boot", nsim = 1000) -->
+<!-- ``` -->
+
+### Effect Size
+
+You can computed the McFadden's $R^2$ using the formula in the textbook or the
+notes (but it requires the log-likelihood to be defined). Alternatively, you can
+compute the $R^2$ on the latent variate $\eta$, which usually gives larger
+results.
+
+```{r}
+# MuMIn::r.squaredGLMM(ran_slp)
+sjstats::r2(ran_slp)
+```
+
+### Diagnostics
+
+#### Marginal Model Plots
+
+Obtain plots comparing the non-parametric fit to the data (in blue) and the
+model-implied relationship (in red) on the binned data
+
+```{r}
+hsbsub_bin <- hsbsub_bin %>%
+  mutate(fitted_prob = predict(ran_slp, 
+                               type = "response"),  # fitted probabilities
+         fitted_eta = predict(ran_slp)) # fitted values of linear predictor
+# meanses
+dp1 <- ggplot(hsbsub_bin, aes(x = meanses, y = mathpass)) + 
+  geom_jitter(height = 0.02, width = 0, alpha = 0.1) + 
+  geom_smooth(se = FALSE) + 
+  geom_smooth(aes(y = fitted_prob), se = FALSE, col = "red")
+# ses_gpc
+dp2 <- ggplot(hsbsub_bin, aes(x = ses_gpc, y = mathpass)) + 
+  geom_jitter(height = 0.02, width = 0, alpha = 0.1) + 
+  geom_smooth(se = FALSE) + 
+  geom_smooth(aes(y = fitted_prob), se = FALSE, col = "red")
+gridExtra::grid.arrange(dp1, dp2, ncol = 2)
+```
+
+#### Binned Residual plots
+
+With binary outcome the usual residual plot will not work. Instead, we group
+the residual in several intervals of predicted $\eta$ values, and then plot it:
+
+```{r binned_res}
+sjstats::binned_resid(ran_slp)
+```
+
+The gray lines indicate $\pm 2$ standard error bounds. If most points are 
+within the bounds and there is no clear pattern of the graph, the linearity
+assumption is generally satisfied.
+
+#### Other diagnostics
+
+You can use similar R code we discussed in the unit for diagnostics to examine
+potential multicollinearity and influential clusters/observations. 
+
+## Poisson Model
+
+Going back to the epilepsy data, we can instead try a Poisson model with log
+link (and log of baseline):
+
+```{r m1_pois}
+epilepsy_dat <- epilepsy_dat %>% 
+  mutate(logbase = log(base))
+m1_pois_laplace <- glmer(seizure.rate ~ logbase + (1 | subject), 
+                         data = epilepsy_dat, 
+                         # Specify a poisson distribution with log link
+                         family = poisson(link = "log"))
+m1_pois <- glmmTMB(seizure.rate ~ logbase + (1 | subject), 
+                   data = epilepsy_dat, 
+                   # Specify a poisson distribution with log link
+                   family = poisson(link = "log"))
+summary(m1_pois)
+```
+
+### Diagnostics:
+
+The residual plot will look at the assumption of linearity. Note, however, that
+it **cannot be used to examine heteroscedasticity.** Indeed, homogeneity of 
+variance is not an assumption of the Poisson model; the assumption is that the
+conditional variance given a specific value of the linear predictor ($\eta$) is 
+equal to the given value of the linear predictor. 
+
+```{r}
+resid_df <- mutate(epilepsy_dat, 
+                   # Residual on the linear predictor
+                   .resid = resid(m1_pois, type = "pearson"), 
+                   # Fitted value on the linear predictor
+                   .fitted = predict(m1_pois))
+ggplot(resid_df, aes(.fitted, .resid)) + 
+  geom_point() +  # show the points
+  geom_smooth()  # add a smoother
+# Some outliers
+```
+
+#### Marginal model plot
+
+```{r res_pois}
+ggplot(resid_df, 
+       aes(x = logbase, y = log(seizure.rate))) + 
+  geom_jitter(alpha = 0.3) + 
+  geom_smooth(se = FALSE) + 
+  geom_smooth(aes(y = .fitted), se = FALSE, col = "red")
+```
+
+### Effect Size
+
+```{r}
+sjstats::r2(m1_pois)
+```
+
+### Bayesian estimation
+
+```{r m1_pois_mcmc, results='hide', cache=TRUE}
+# Bayesian:
+library(brms)
+m1_pois_mcmc <- brm(seizure.rate ~ logbase + (1 | subject), 
+                    data = epilepsy_dat, 
+                    # Specify a poisson distribution with log link
+                    family = poisson(link = "log"), 
+                    # prior recommended in STAN for logistic regression
+                    prior = prior(student_t(4, 0, 2.5), class = b), 
+                    chains = 2L, iter = 1000L)
+```
+
+```{r}
+m1_pois_mcmc
+# Show the predicted effect:
+plot(marginal_effects(m1_pois_mcmc), ask = FALSE)
+# Posterior predictive check
+pp_check(m1_pois_mcmc)
+```
+
+### Negative Binomial
+
+```{r}
+m1_nb_laplace <- glmer.nb(seizure.rate ~ logbase + (1 | subject), 
+                          data = epilepsy_dat)
+m1_nb <- glmmTMB(seizure.rate ~ logbase + (1 | subject), 
+                   data = epilepsy_dat, 
+                   # Specify a poisson distribution with log link
+                   family = nbinom2(link = "log"))
+summary(m1_nb)
+```
+
+The overdispersion is quite high!
+
+#### Model Comparison
+
+```{r}
+anova(m1_pois, m1_nb)
+```
+
+
